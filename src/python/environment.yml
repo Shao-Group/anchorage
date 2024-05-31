@@ -1,0 +1,14 @@
+name: anchorage
+
+channels:
+  - bioconda
+  - conda-forge
+  - anaconda
+
+dependencies:
+  - python=3.9 
+  - kmc 
+  - seqkit
+  - networkx
+  - numpy
+
