@@ -1,17 +1,9 @@
-"""
-Author: Carl Zang
-Date Started: Jul 2023
-Last updated: Aug 1 2023 or check git history 
-
-Version:    v1.0.0
-
+""""
 Compute k-mer coverage. Estimate contig coverage and length from LoopSeq reads.
-
-Usage: see test() for an example. Import module/class. Don't run from main.
-
 
 BSD 3-Clause License
 
+Copyright (c) 2024, Xiaofei Carl Zang, Mingfu Shao, and The Pennsylvania State University
 Copyright (c) 2024, Element Biosciences 
 
 Redistribution and use in source and binary forms, with or without
@@ -44,21 +36,25 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
 
-from loop.common.utils import RunShellCommand
+from anchorageUtil import RunShellCommand
+from anchorageUtil import revcomp
 from collections import Counter
+from collections import defaultdict
 import sys
 import os
 
 
 class FqStatistician:
-    def __init__(self, fqfile, nameprefix="", k=33):
+    def __init__(self, fqfile_left, fqfile_right, nameprefix="", k=33):
         # config param
-        self.fqfile = fqfile
+        self.fqfile_left = fqfile_left
+        self.fqfile_right = fqfile_right
         self.nameprefix = nameprefix + "FqStat_Estimation"
         self.kmc_file = ""
         self.k = k
         # Stats
         self.kmers_depth = []
+        self.kmers_depth_dict = defaultdict(int)
         self.depth_counter = None
         self.num_seqs = -1
         self.num_bases = -1
@@ -66,7 +62,7 @@ class FqStatistician:
         self.read_min_len = -1
         self.read_max_len = -1
         self.effective_len = -1
-        self.get_kmer_depth()
+        self.get_kmer_depth_both()
         self.get_depth_counter()
         self.get_fq_stats()
         # Estimates
@@ -75,19 +71,34 @@ class FqStatistician:
         self.cov_estimation  = -1
         self.cov_50percentile_cut_tail = -1
         self.estimate_coverage()
-    
 
-    def get_kmer_depth(self):
+    def get_kmer_depth_both(self):
+        self.get_kmer_depth(isLeft=True)
+        self.get_kmer_depth(isLeft=False)
+        for k,v in self.kmers_depth_dict.items():
+            self.kmers_depth.append((k,v))
+        self.kmers_depth.sort(key=lambda x: x[1], reverse=True)
+        assert len(self.kmers_depth) > 0
+        for i in range(1, len(self.kmers_depth)):
+            assert self.kmers_depth[i][1] <= self.kmers_depth[i-1][1]
+        return 0
+
+
+    def get_kmer_depth(self, isLeft):
         """
             Call kmc to compute kmer depth
         """
-        fqfile = self.fqfile
+        if isLeft:
+            fqfile = self.fqfile_left
+        else:
+            fqfile = self.fqfile_right
+            
         if fqfile.endswith('.fq') or fqfile.endswith('.fastq'):
             fqflag = '-fq {}'.format(fqfile)
         elif fqfile.endswith('.fa') or fqfile.endswith('.fasta'):
             fqflag = '-fa {}'.format(fqfile)
         else:
-            raise IOError("File {} is not fasta nor fastq file!".format(self.fqfile))
+            raise IOError("File {} is not fasta nor fastq file!".format(fqfile))
         
         # build KMC database
         kmc_executable = 'kmc'
@@ -97,19 +108,22 @@ class FqStatistician:
         max_value_of_counter = '-cs100000000' #1e8
         donot_use_canonical = '-b'
         fqbase = os.path.basename(fqfile)
-        output_kmc_db = '{}.{}.k{}'.format(self.nameprefix, fqbase, k)
-        work_dir = "."
+        output_kmc = '{}.{}.k{}'.format(self.nameprefix, fqbase, k)
+        work_dir = '{}_kmc_dir/'.format(output_kmc)
+        if not os.path.exists(work_dir):
+            os.makedirs(work_dir)
+        output_kmc_db = work_dir + '{}.k{}'.format(fqbase, k)
         cmd_kmcbuild = ' '.join([kmc_executable, kflag, exclude_less_than, max_value_of_counter, donot_use_canonical, fqflag, output_kmc_db, work_dir])
         RunShellCommand(cmd_kmcbuild, 'Build KMC database for {} {} {} {}'.format(fqfile, kflag, exclude_less_than, max_value_of_counter))
 
         # dump and sort KMC database
         kmc_dump_executable = 'kmc_dump'
-        output_kmc_dumped = '{}.{}.k{}.kmc.tsv'.format(self.nameprefix, fqbase, k)
+        output_kmc_dumped = work_dir + '{}.k{}.kmc.tsv'.format(fqbase, k)
         cmd_kmcdump = ' '.join([kmc_dump_executable, exclude_less_than, output_kmc_db, output_kmc_dumped])
         RunShellCommand(cmd_kmcdump, 'Dump KMC database for {} {} {} {}'.format(fqfile, k, exclude_less_than, max_value_of_counter))
 
-        output_kmc_sorted = '{}.{}.k{}.sorted.tsv'.format(self.nameprefix, fqbase, k)
-        cmd_kmc_sort = 'sort -r -k2 -n {} > {}'.format(output_kmc_dumped, output_kmc_sorted)
+        output_kmc_sorted = work_dir + '{}.k{}.sorted.tsv'.format(fqbase, k)
+        cmd_kmc_sort = 'sort -r -k2 -n {} -o {}'.format(output_kmc_dumped, output_kmc_sorted)
         RunShellCommand(cmd_kmc_sort, 'Sorting KMC output')
 
         # Read
@@ -117,27 +131,29 @@ class FqStatistician:
             for l in f.readlines():
                 kmer, count = l.split()
                 count = int(count)
-                self.kmers_depth.append((kmer, count))
+                if isLeft:
+                    kmer = kmer
+                else:
+                    kmer = revcomp(kmer)
+                self.kmers_depth_dict[kmer] += count
         
-        assert len(self.kmers_depth) > 0
-        for i in range(1, len(self.kmers_depth)):
-            assert self.kmers_depth[i][1] <= self.kmers_depth[i-1][1]
-
+        assert len(self.kmers_depth_dict) > 0
         return 0
     
     def get_depth_counter(self):
         self.depth_counter = Counter([x[1] for x in self.kmers_depth])
 
     def get_fq_stats(self):
-        seqkit_stat = 'seqkit stat {}'.format(self.fqfile)
-        statline = RunShellCommand(seqkit_stat, "Get {} stats".format(self.fqfile), return_stdout=True).split('\n')[1].split()
-        #file     format  type  num_seqs  sum_len  min_len  avg_len  max_len
-        self.num_seqs = int(statline[3].replace(',', ''))
-        self.num_bases = int(statline[4].replace(',', ''))
-        self.read_avg_len = float(statline[6].replace(',', ''))
-        self.read_min_len = float(statline[5].replace(',', ''))
-        self.read_max_len = float(statline[7].replace(',', ''))
-        self.effective_len = self.read_avg_len - self.k + 1
+        for fq in [self.fqfile_left, self.fqfile_right]:
+            seqkit_stat = 'seqkit stat {}'.format(fq)
+            statline = RunShellCommand(seqkit_stat, "Get {} stats".format(fq)).split('\n')[1].split()
+            #file     format  type  num_seqs  sum_len  min_len  avg_len  max_len
+            self.num_seqs += int(statline[3].replace(',', ''))
+            self.num_bases += int(statline[4].replace(',', ''))
+            self.read_avg_len += float(statline[6].replace(',', ''))
+            self.read_min_len += float(statline[5].replace(',', ''))
+            self.read_max_len += float(statline[7].replace(',', ''))
+        self.effective_len = self.read_avg_len - self.k + 1 - self.k + 1    # for both reads
         return 0
 
     def n_percentage_cover_kmer(self, percentage = 0.5):
@@ -188,10 +204,9 @@ class ContigStatistician:
                 k: kmer size
         """
         # stats
-        self.left_stats = FqStatistician(left, nameprefix, k)
-        self.right_stats = FqStatistician(right, nameprefix, k)
+        self.stats = FqStatistician(left, right, nameprefix, k)
         self.k = k
-
+        
         # Estimates
         self.nameprefix = nameprefix + "ContigStat_Estimation"
         self.cov_upper_bound = 0
@@ -220,12 +235,12 @@ class ContigStatistician:
             Description: estimation is based on kmer cov
                 incld. n50 kmer, 50 percentile kmer
         """
-        for fqstats in [self.left_stats, self.right_stats]:
-            coeff = fqstats.read_avg_len / fqstats.effective_len
-            self.cov_upper_bound += fqstats.cov_upper_bound * coeff
-            self.cov_lower_bound += fqstats.cov_lower_bound * coeff
-            self.cov_estimation  += fqstats.cov_estimation  * coeff 
-            self.cov_50percentile_cut_tail += fqstats.cov_50percentile_cut_tail * coeff
+        fqstats  = self.stats
+        coeff = fqstats.read_avg_len / fqstats.effective_len
+        self.cov_upper_bound += fqstats.cov_upper_bound * coeff
+        self.cov_lower_bound += fqstats.cov_lower_bound * coeff
+        self.cov_estimation  += fqstats.cov_estimation  * coeff 
+        self.cov_50percentile_cut_tail += fqstats.cov_50percentile_cut_tail * coeff
 
         assert self.cov_lower_bound >= 0
         assert self.cov_lower_bound <= self.cov_estimation
@@ -237,11 +252,14 @@ class ContigStatistician:
         """
             estimate: lower/upper bound and good estimation of contig length range 
         """
-        self.num_bases = self.left_stats.num_bases + self.right_stats.num_bases 
+        self.num_bases = self.stats.num_bases
 
         self.length_lower_bound = self.num_bases / self.cov_upper_bound
         self.length_upper_bound = self.num_bases / self.cov_lower_bound
-        self.length_estimation = self.num_bases / self.cov_estimation
+        # self.length_estimation = self.num_bases / self.cov_estimation
+        
+        self.length_estimation = self.stats.num_bases/ (self.stats.cov_estimation * (self.stats.read_avg_len / self.stats.effective_len))
+
         self.length_estimation_by_cut_tail = self.num_bases / self.cov_50percentile_cut_tail
 
         if self.length_estimation < 500:
@@ -269,19 +287,20 @@ class ContigStatistician:
         # else:
         #     self.length_good = (self.length_estimation_by_cut_tail + self.length_estimation) / 2
         self.length_good = self.length_estimation
-        self.length_lower_bound = min(max(self.length_lower_bound, 0.5 * self.length_good), self.length_estimation * 0.75)#, self.length_estimation_by_cut_tail * 0.75)
-        self.length_upper_bound = max(min(self.length_upper_bound, 2   * self.length_good), self.length_estimation * 1.25)#, self.length_estimation_by_cut_tail * 1.25)
+        # self.length_lower_bound = min(max(self.length_lower_bound, 0.5 * self.length_good), self.length_estimation * 0.75)#, self.length_estimation_by_cut_tail * 0.75)
+        # self.length_upper_bound = max(min(self.length_upper_bound, 2   * self.length_good), self.length_estimation * 1.25)#, self.length_estimation_by_cut_tail * 1.25)
+        self.length_lower_bound = self.length_good * 0.5
+        self.length_upper_bound = self.length_good * 2
         return 0
 
     def write_stats(self):
         n = self.nameprefix + ".stats.tsv"
         with open(n, 'w') as f:
             l1 = '{}\t{}\t{}\t{}\t{}\t{}'.format('name','estimate', 'median_no_tail', 'lower_bound', 'upper_bound', 'recommend')
-            l2 = '{}\t{}\t{}\t{}\t{}\t{}'.format('left.cov',    self.left_stats.cov_estimation,     self.left_stats.cov_50percentile_cut_tail,  self.left_stats.cov_lower_bound,    self.left_stats.cov_upper_bound,        'NA')
-            l3 = '{}\t{}\t{}\t{}\t{}\t{}'.format('right.cov',   self.right_stats.cov_estimation,    self.right_stats.cov_50percentile_cut_tail, self.right_stats.cov_lower_bound,   self.right_stats.cov_upper_bound,       'NA')
+            l2 = '{}\t{}\t{}\t{}\t{}\t{}'.format('seq.cov',    self.stats.cov_estimation,      self.stats.cov_50percentile_cut_tail,  self.stats.cov_lower_bound,    self.stats.cov_upper_bound,        'NA')
             l4 = '{}\t{}\t{}\t{}\t{}\t{}'.format('contig.cov',  self.cov_estimation,                self.cov_50percentile_cut_tail,             self.cov_lower_bound,               self.cov_upper_bound,                   'NA')
             l5 = '{}\t{}\t{}\t{}\t{}\t{}'.format('contig.len',  self.length_estimation,             self.length_estimation_by_cut_tail,         self.length_upper_bound,            self.length_lower_bound,                self.length_good)
-            f.write('\n'.join([l1, l2, l3, l4, l5]))
+            f.write('\n'.join([l1, l2, l4, l5]))
 
 def test():
     # Usage:
@@ -300,11 +319,11 @@ def test():
         print("wrong number of arguments!", file = sys.stderr)
 
     cs = ContigStatistician(left, right, 'test', k = 33)
-    print('{}\t{}\t{}\t{}\t{}\t{}'.format('name','est', '50pct_no_tail', 'lower', 'upper', 'good'))
-    print('{}\t{}\t{}\t{}\t{}\t{}'.format('R1.cov', cs.left_stats.cov_estimation, cs.left_stats.cov_50percentile_cut_tail, cs.left_stats.cov_lower_bound, cs.left_stats.cov_upper_bound, 'NA'))
-    print('{}\t{}\t{}\t{}\t{}\t{}'.format('R2.cov', cs.right_stats.cov_estimation, cs.right_stats.cov_50percentile_cut_tail, cs.right_stats.cov_lower_bound, cs.right_stats.cov_upper_bound, 'NA'))
-    print('{}\t{}\t{}\t{}\t{}\t{}'.format('cs.cov', cs.cov_estimation, cs.cov_50percentile_cut_tail, cs.cov_lower_bound, cs.cov_upper_bound, 'NA'))
-    print('{}\t{}\t{}\t{}\t{}\t{}'.format('cs.len',cs.length_estimation, cs.length_estimation_by_cut_tail, cs.length_upper_bound, cs.length_lower_bound, cs.length_good))
+    # print('{}\t{}\t{}\t{}\t{}\t{}'.format('name','est', '50pct_no_tail', 'lower', 'upper', 'good'))
+    # print('{}\t{}\t{}\t{}\t{}\t{}'.format('R1.cov', cs.left_stats.cov_estimation, cs.left_stats.cov_50percentile_cut_tail, cs.left_stats.cov_lower_bound, cs.left_stats.cov_upper_bound, 'NA'))
+    # print('{}\t{}\t{}\t{}\t{}\t{}'.format('R2.cov', cs.right_stats.cov_estimation, cs.right_stats.cov_50percentile_cut_tail, cs.right_stats.cov_lower_bound, cs.right_stats.cov_upper_bound, 'NA'))
+    # print('{}\t{}\t{}\t{}\t{}\t{}'.format('cs.cov', cs.cov_estimation, cs.cov_50percentile_cut_tail, cs.cov_lower_bound, cs.cov_upper_bound, 'NA'))
+    # print('{}\t{}\t{}\t{}\t{}\t{}'.format('cs.len',cs.length_estimation, cs.length_estimation_by_cut_tail, cs.length_upper_bound, cs.length_lower_bound, cs.length_good))
     print("ContigStatistician test finished!")
 
 if __name__ == "__main__":

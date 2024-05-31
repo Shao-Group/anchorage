@@ -1,15 +1,9 @@
 """
-Author: Carl Zang
-Date Started: Jul 2023
-Last updated: Aug 17 2023 or check git commit 
-
-Version:    v0.3.0
-
 Help information: run `python anchorGuidedAssembler.py -h`
-
 
 BSD 3-Clause License
 
+Copyright (c) 2024, Xiaofei Carl Zang, Mingfu Shao, and The Pennsylvania State University
 Copyright (c) 2024, Element Biosciences 
 
 Redistribution and use in source and binary forms, with or without
@@ -45,13 +39,17 @@ import networkx as nx
 
 # internal and standard library
 from contigStatistician import ContigStatistician
-from loop.analysis.utility import revcomp
+from anchorageUtil import revcomp
 import aligner  
 import sys
 from sys import argv
+from collections import defaultdict
+import copy
+from queue import PriorityQueue
 import argparse
 import logging
 import json
+from copy import deepcopy
 
 
 class AnchorGuidedAssembler():
@@ -86,10 +84,19 @@ class AnchorGuidedAssembler():
             barcode_trim = True,
             barcode_len = 0,
             asssembly_algo_config = dict(), 
+            do_strategy_low_cov = True,
+            algorithm = 'dp',
+            candidNum = 30,
             verbose=False):
         
-        # config
+        # log and debug
         self.logger = logging.getLogger('Anchor-Guided Assembly') 
+        # logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+        # logging.basicConfig(stream=sys.stdout, level=logging.WARNING)
+        logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+        self.__DEBUG__ : bool = False
+
+        # config and variables
         self.gfa = gfafile
         self.verbose = verbose
         self.left_fq = left_fq
@@ -104,6 +111,10 @@ class AnchorGuidedAssembler():
         self.outfile = output_contig_file if output_contig_file else "anchor_guide_contig"
         self.assembler_config = {}
         self.barcode_trim = barcode_trim
+        self.barcode_len = 0
+        self.do_strategy_low_cov = do_strategy_low_cov
+        self.algorithm = algorithm
+        self.candidNum = candidNum
         if self.barcode_trim:
             assert barcode_len > 0
             self.barcode_len = barcode_len
@@ -128,6 +139,7 @@ class AnchorGuidedAssembler():
         self.target = None
         self.contig_path = []
         self.contig_seq = ""
+        self.contig_bottle = -1
 
         self.assemble()        
         if not self.contig_seq and not self.contig_path:
@@ -177,8 +189,8 @@ class AnchorGuidedAssembler():
         self.contig_length_min = cs.length_lower_bound
         self.contig_length_max = cs.length_upper_bound        
         self.cov_fav_estimate = cs.cov_estimation
-        self.cov_min_estimate = max(cs.cov_lower_bound, 0.1 * self.cov_fav_estimate)
-        self.cov_max_estimate = min(cs.cov_upper_bound, 5   * self.cov_fav_estimate)
+        self.cov_min_estimate = max(max(cs.cov_lower_bound, 0.1 * self.cov_fav_estimate) - 10, 2)  # have a buffer of 10
+        self.cov_max_estimate = max(min(cs.cov_upper_bound, 5   * self.cov_fav_estimate)     , 10)     # have a buffer of 10
         msg = "Contig statistics:\n"
         msg += "contig_length_max = {}\n".format(self.contig_length_max)        
         msg += "contig_length_min = {}\n".format(self.contig_length_min)
@@ -186,7 +198,8 @@ class AnchorGuidedAssembler():
         msg += "cov_max_estimate = {}\n".format(self.cov_max_estimate)
         msg += "cov_min_estimate = {}\n".format(self.cov_min_estimate)
         msg += "cov_fav_estimate = {}\n".format(self.cov_fav_estimate)
-        self.logger.debug(msg)
+        if self.verbose:
+            self.logger.debug(msg)
         assert self.contig_length_max >= self.contig_length_fav and self.contig_length_fav >= self.contig_length_min      
         assert self.cov_max_estimate >= self.cov_fav_estimate and self.cov_fav_estimate >= self.cov_min_estimate
         return 0
@@ -326,6 +339,75 @@ class AnchorGuidedAssembler():
         """
         raise NotImplementedError("Assuming index length is always smaller than overlap length. No chance of using anchor_edge()")
 
+    def dual_node_max_bottle_examine(self, dual_name):
+        dual_node_name = self.split_dual_anchor_nodes(dual_name)
+        if dual_node_name is None:
+            return None
+        if len(self.node_path_to_seq(self.graph, [dual_node_name])) <= 0:
+            return None
+        
+        if len(self.contig_path) <= 0:
+            self.contig_path = [dual_node_name]
+            self.contig_seq = self.node_path_to_seq(self.graph, self.contig_path)
+            self.contig_bottle = self.graph.nodes[dual_node_name]['depth']
+            return self.contig_path
+
+        min_bottle_resolution = max(self.cov_fav_estimate * 0.05, 10)        
+        max_bottle = self.contig_bottle
+        max_bottle_length_diff = abs(len(self.contig_seq) - self.contig_length_fav)
+
+        bottle_neck = self.graph.nodes[dual_node_name]['depth']
+        path_len = len(self.node_path_to_seq(self.graph, [dual_node_name]))  
+        diff = abs(path_len - self.contig_length_fav)
+
+        # not max bottle
+        if bottle_neck < max_bottle - min_bottle_resolution:
+            return None
+        # new max bottle or # equal bottle w. better resolution
+        if bottle_neck > max_bottle + min_bottle_resolution or diff < max_bottle_length_diff:
+            self.contig_path = [dual_node_name]
+            self.contig_seq = self.node_path_to_seq(self.graph, self.contig_path)
+            self.contig_bottle = bottle_neck
+            return dual_node_name
+        else:
+            # print("same bottle neck but bad length {}".format(path_len))
+            pass
+        return None
+                
+    def split_dual_anchor_nodes(self, original_dual):
+        split_dual = 'AGAsplitdual_' + original_dual
+        seq = self.graph.nodes[original_dual]['seq']  
+        dp = self.graph.nodes[original_dual]['depth']
+        
+        # split start
+        pos = aligner.subseq_pos(self.anchor_start, seq, self.nm_anchor_start)
+        assert self.nm_anchor_start >= 0
+        assert pos >= 0 and pos <= len(seq)
+        seq = seq[pos:]
+
+        # split end
+        rc_pos = aligner.subseq_pos(revcomp(self.anchor_end), revcomp(seq), self.nm_anchor_end)
+        pos = len(seq) - rc_pos
+        if pos < 0 or rc_pos < 0:     # start and end are going outwards, not inwards
+            return None
+        assert self.nm_anchor_end >= 0
+        assert pos >= 0 
+        assert pos <= len(seq)
+
+        seq = seq[:pos]
+        length = len(seq)
+        if length <= 0: 
+            return None
+        
+        self.graph.add_node(split_dual, length=length, depth=dp, seq=seq) 
+        ## Need original source, target to do paired-anchor path searching
+        # self.source = split_dual
+        # self.target = split_dual
+        if self.verbose:
+            print("Split Dual Node:", split_dual, self.graph.nodes[split_dual])
+        return split_dual
+
+
     def split_anchor_nodes(self):
         """
             Description:
@@ -362,7 +444,8 @@ class AnchorGuidedAssembler():
                     seq_overlap = split_seq
                 self.graph.add_edge(split_start, edge_target, len_over=len_over, seq=seq_overlap) 
             self.source = split_start
-            print("Split Node:", split_start, self.graph.nodes[split_start])
+            if self.verbose:
+                print("Split Node:", split_start, self.graph.nodes[split_start])
 
         # split end node 
         end = self.target
@@ -388,7 +471,8 @@ class AnchorGuidedAssembler():
                     seq_overlap = split_seq
                 self.graph.add_edge(edge_source, split_end, len_over=len_over, seq=seq_overlap) 
             self.target = split_end
-            print("Split Node:", split_end, self.graph.nodes[split_end])
+            if self.verbose:
+                print("Split Node:", split_end, self.graph.nodes[split_end])
 
         return 0
 
@@ -409,17 +493,20 @@ class AnchorGuidedAssembler():
         anchor_end_nodes   = []
         for i in range(mismatch + 1):
             # if len(anchor_start_nodes) == 0:
-            self.logger.info('Identifying anchor start nodes permitting {} mismatches'.format(i))
+            if self.verbose:
+                self.logger.info('Identifying anchor start nodes permitting {} mismatches'.format(i))
             anchor_start_nodes = self.anchor_nodes(fix_start, flex_start, nm=i)
             self.nm_anchor_start = i
 
             # if len(anchor_end_nodes) == 0:
-            self.logger.info('Identifying anchor end nodes permitting {} mismatches'.format(i))
+            if self.verbose:
+                self.logger.info('Identifying anchor end nodes permitting {} mismatches'.format(i))
             anchor_end_nodes = self.anchor_nodes(fix_end, flex_end, nm=i)
             self.nm_anchor_end = i
-
-        self.logger.info('Anchor start nodes: {}'.format(anchor_start_nodes))
-        self.logger.info('Anchor end nodes: {}'.format(anchor_start_nodes))
+        
+        if self.verbose:
+            self.logger.info('Anchor start nodes: {}'.format(anchor_start_nodes))
+            self.logger.info('Anchor end nodes: {}'.format(anchor_start_nodes))
         
         if len(anchor_start_nodes) == 0 or len(anchor_end_nodes) == 0:
             raise nx.NodeNotFound("No anchor node found even if with max {} mismatches".format(mismatch))        
@@ -486,8 +573,9 @@ class AnchorGuidedAssembler():
                 if self.graph_remove_low_depth_node(node, must_have_st_path_after_removal):
                     removed_count += 1
                     flag = True
-                    break
-        self.logger.info("Removed {} low-depth nodes < {}.".format(removed_count, self.cov_min_estimate))
+                    break    
+        if self.verbose:
+            self.logger.info("Removed {} low-depth nodes < {}.".format(removed_count, self.cov_min_estimate))
         return 0
 
 
@@ -505,7 +593,8 @@ class AnchorGuidedAssembler():
             return False
         
         if not must_have_st_path_after_removal:
-            self.logger.info('Removing node {} depth {}, length {}'.format(node, depth, str(self.graph.nodes[node]['length'])))
+            if self.verbose:
+                self.logger.info('Removing node {} depth {}, length {}'.format(node, depth, str(self.graph.nodes[node]['length'])))
             self.graph.remove_node(node)
             return True
         
@@ -520,10 +609,12 @@ class AnchorGuidedAssembler():
         new_graph = self.graph.copy()
         new_graph.remove_node(node)
         if not nx.has_path(new_graph, self.source, self.target):
-            self.logger.info('Keeping node {} depth {}, as removal results in no s-t path'.format(node, depth))
+            if self.verbose:
+                self.logger.info('Keeping node {} depth {}, as removal results in no s-t path'.format(node, depth))
             return False    
         else:
-            self.logger.info('Removing node {} depth {}, length {}'.format(node, depth, str(self.graph.nodes[node]['length'])))
+            if self.verbose:
+                self.logger.info('Removing node {} depth {}, length {}'.format(node, depth, str(self.graph.nodes[node]['length'])))
             self.graph.remove_node(node)
             return True
 
@@ -543,12 +634,13 @@ class AnchorGuidedAssembler():
         for nm_permit in range(0, self.max_nm_anchors + 1):
             if flag_path_found:
                 break
-            # rank anchor combinations by depth sum
+            # rank anchor combinations by min depth 
             try:
                 self.get_anchor_node_lists(nm_permit)
             except nx.NodeNotFound:
-                self.logger.debug("No anchor node found even if with max {} mismatches".format(nm_permit))
-                self.logger.debug("Increase # mismatches allowed and try again")
+                if self.verbose:
+                    self.logger.debug("No anchor node found even if with max {} mismatches".format(nm_permit))
+                    self.logger.debug("Increase # mismatches allowed and try again")
                 continue
             anchor_pairs = []
             for i in self.anchor_start_nodes:
@@ -556,106 +648,215 @@ class AnchorGuidedAssembler():
                     dp1 = self.graph.nodes[i]['depth']
                     dp2 = self.graph.nodes[j]['depth']
                     anchor_pairs.append((i, j, dp1, dp2))
-            anchor_pairs.sort(key= lambda x: x[2] + x[3], reverse=True)
+            anchor_pairs.sort(key= lambda x: (min(x[2], x[3]), max(x[2], x[3])), reverse=True)
 
             # solve multiple anchor pairs problem
+            # TODO: get all candidates, then filter based on lengths
             for s, t, _, _ in anchor_pairs:
                 self.source = s
                 self.target = t
-                if not nx.has_path(self.graph, self.source, self.target): 
+                if not nx.has_path(self.graph, self.source, self.target) and len(self.contig_path) <= 0: 
                     continue
                 
+                # examine max bottle of node with both anchors
                 if self.source == self.target:
-                    #FIXME: need to check positions, fix trimming
-                    self.contig_path = [self.source]
-                    self.contig_seq = self.node_path_to_seq(self.graph, self.contig_path)
-                    # return 0
+                    self.dual_node_max_bottle_examine(self.source) 
                 
+                # examine max bottle of node in different anchors
                 self.split_anchor_nodes()
 
-                # prune graph
-                self.graph_remove_low_depth_nodes(must_have_st_path_after_removal=True)
+                # prune graph #TODO: better prune
+                # self.graph_remove_low_depth_nodes(must_have_st_path_after_removal=True)
                 if not nx.has_path(self.graph, self.source, self.target):   
                     continue
                 
                 # find optimal path
-                s_t_path = self.path_max_bottleneck_weight(self.source, self.target)       
-                
-                self.contig_path = s_t_path
-                self.contig_seq = self.node_path_to_seq(self.graph, self.contig_path)
+                self.path_max_bottleneck_weight(self.source, self.target)
 
-                if s_t_path: 
-                    self.logger.debug('self contig path is {}'.format(','.join(self.contig_path)))
-                    self.logger.debug('self non-error-corrected & non-trimmed contig seq is {}'.format(self.contig_seq))    
-                    self.logger.log("find desirable path")
-                    flag_path_found = True
-                    break 
+                if len(self.contig_path) > 0:
+                    if self.verbose:
+                        self.logger.debug('self contig path is {}'.format(','.join(self.contig_path)))
+                        self.logger.debug('self non-error-corrected & non-trimmed contig seq is {}'.format(self.contig_seq))    
+                    self.logger.info("find desirable path")
+                    flag_path_found = True   
+                    break    
 
-                #TODO:
-                # self.error_correction()
-                # self.trim_contig_beyond_anchor()
-                # self.logger.debug('self error-corrected and trimmed contig seq is {}'.format(self.contig_seq))
-        
         return 0
     
+    def dynamic_programming_max_bottle(self, s, t, min_bottle_resolution = 0, candidNum = 30, cutoff = -1):
+        #TODO: sort edges, keep last updated num, skip if needed
+        def increment_length(tail, node):
+            nodeseqlen = len(self.graph.nodes[node]['seq'])
+            try:
+                overlap_len = self.graph.edges[(tail,node)]['len_over']
+            except KeyError:
+                raise nx.NodeNotFound('increament not valid or edge {} misses length property'.format((tail,node)))
+            if nodeseqlen >= overlap_len:
+                return nodeseqlen - overlap_len
+            else:
+                return nodeseqlen - overlap_len     # negative increment
+            pass
+        assert nx.has_path(self.graph, s, t)
+        assert s != t
+        assert candidNum >= 0
+        assert min_bottle_resolution >= 0
+        # maxbottle[i] is the max bottle from s to i, excluding cov of i
+        subpath_sublength = ([s], len(self.graph.nodes[s]['seq']))
+        maxbottleList = list()
+        for i in range(self.graph.number_of_edges()):
+            maxbottleList.append(defaultdict(lambda : PriorityQueue(maxsize=candidNum)))
+            maxbottleList[i][s].put_nowait((float('inf'), subpath_sublength))
+
+        for index in range(1, self.graph.number_of_edges()):
+            for u, v in self.graph.edges():
+                uq = maxbottleList[index-1][u]
+                vq = maxbottleList[index][v]
+                if uq.empty():
+                    continue
+                if vq.empty():
+                    for priority, (subp, ulen) in maxbottleList[index - 1][v].queue:
+                        vq.put((priority, (deepcopy(subp), ulen)))
+
+                for priority, (subp, ulen) in uq.queue:
+                    bottle = priority
+                    assert(bottle > 0)
+                    cur_len = ulen + increment_length(u,v)
+
+                    if cutoff > 0 and cur_len > cutoff:
+                        continue
+                    # cur_bottle = min(bottle, self.graph.nodes[u]['depth'])
+                    
+                    # subpath present?
+                    present = False
+                    for priority0, (subp0, ulen0) in vq.queue:
+                        if subp0[:-1] == subp:
+                            present = True
+                            break
+                    if present:
+                        continue
+                    
+                    cur_bottle = min(bottle, self.graph.nodes[v]['depth'])
+                    if not vq.full():
+                        cp = copy.deepcopy(subp)
+                        cp.append(v)
+                        vq.put_nowait((cur_bottle, (cp, cur_len)))
+                        continue
+
+                    v_min_bottle = vq.queue[0][0] if vq.full() else 0
+
+                    # if cur_bottle < v_min_bottle - min_bottle_resolution:
+                    if cur_bottle < v_min_bottle:
+                        continue
+                    # elif cur_bottle > v_min_bottle + min_bottle_resolution:
+                    elif cur_bottle >= v_min_bottle:
+                        vq.get_nowait()
+                        cp = copy.deepcopy(subp)
+                        cp.append(v)
+                        vq.put_nowait((cur_bottle, (cp, cur_len)))
+                assert not vq.empty()
+        
+        paths = []
+        assert not maxbottleList[-1][t].empty()
+        assert not maxbottleList[-1][t].qsize() == 0
+        while maxbottleList[-1][t].qsize() != 0:
+            __cov, (p, __length) = maxbottleList[-1][t].get()
+            paths.append(p)
+        paths.reverse()
+        return paths
 
     def path_max_bottleneck_weight(self, s, t):
         """
             Select path to maximize bottleneck weight, also least length discrepancy
             Use a min-resolution for max bottle neck, so that to tolerate some errors in bottleneck 
-            
-            TODO:  reimplement algorithm in https://www.biorxiv.org/content/10.1101/2021.02.26.433113v1 
-                   Asofnow, the algorithm enumerates all paths, worst case is O(n!)
         """
-        if not nx.has_path(self.graph, s, t):
+        if not nx.has_path(self.graph, s, t) and (len(self.contig_path) == 0 or len(self.contig_seq) == 0):
             raise nx.NetworkXUnfeasible(
                 'No path exists between s {} and t {}. Contigs does not exist in graph!'.format(s, t))
         
-        min_bottle_resolution = self.cov_fav_estimate * 0.05  # covereage +- this resolution are considered equal 
+        min_bottle_resolution = max(self.cov_fav_estimate * 0.05, 10)  # covereage +- this resolution are considered equal 
         max_bottle = -1
         max_bottle_path = []
         max_bottle_length_diff = self.contig_length_fav * 1000
 
-        for p in nx.all_simple_paths(self.graph, s, t, cutoff = self.contig_length_max):
+        if len(self.contig_path) > 0:
+            max_bottle_path = self.contig_path
+            max_bottle = self.contig_bottle
+            max_bottle_length_diff = abs(len(self.contig_seq) - self.contig_length_fav)
+
+        candidates = []
+        if self.algorithm == 'dp':
+            candidates = self.dynamic_programming_max_bottle(s, t, min_bottle_resolution, self.candidNum, cutoff = self.contig_length_max)
+        elif self.algorithm == 'all-paths':    
+            candidates = nx.all_simple_paths(self.graph, s, t, cutoff = self.contig_length_max)
+        else:
+            raise ValueError(str(r'algorithm must be one of ["dp", "all-paths"] but got ')+ str(self.algorithm))
+        if not (len(candidates) > 0):
+            return 0
+
+        for p in candidates:
             if self.verbose:
                 self.logger.debug("checking simple s-t path p{}".format(p))
             # check inverted loop
             has_inverted_loop = False
-            sorted_p = sorted(p)
-            for i in range(1, len(sorted_p)):
-                if sorted_p[i][:-1] == sorted_p[i-1][:-1]:
-                    has_inverted_loop = True
-                    break
+            # sorted_p = sorted(p)
+            #FIXME: seem not necessary
+            # for i in range(1, len(sorted_p)):
+            #     if sorted_p[i][:-1] == sorted_p[i-1][:-1]:
+            #         has_inverted_loop = True
+            #         break
             if has_inverted_loop:
-                self.logger.debug("simple s-t path p {} has inverted loop".format(p))
+                if self.verbose:
+                    self.logger.debug("simple s-t path p {} has inverted loop".format(p))
                 continue
 
             # find max bottle neck w/ min_resolution
             # for paths with the same max bottle w. min resolution, choose the path with min diff
             bottle_neck = min([self.graph.nodes[j]['depth'] for j in p])
 
+            # examine path length 
+            path_len = len(self.node_path_to_seq(self.graph, p))  
+            diff = abs(path_len - self.contig_length_fav)
 
+            # cov is very low, max bottle and length estimaiton are not reliable
+            if False  and bottle_neck <= min_bottle_resolution and max_bottle <= min_bottle_resolution:
+                is_choosen = False
+                # no candidates so far
+                if len(max_bottle_path) == 0:
+                    is_choosen = True
+                # length diff smaller, bottle neck larger
+                if diff <= max_bottle_length_diff and bottle_neck > max_bottle:
+                    is_choosen = True
+                # bottle neck contribution larger OR length diff contribution larger
+                bottle_contribution = (bottle_neck - max_bottle) / max_bottle
+                length_contribution = (max_bottle_length_diff - diff) / path_len
+                if bottle_contribution > abs(length_contribution) or length_contribution > abs(bottle_contribution):
+                    is_choosen = True
+                if is_choosen:
+                    max_bottle = bottle_neck
+                    max_bottle_path = p
+                    max_bottle_length_diff = diff
+                    continue
+            else:
+                pass
+            
+            if path_len < self.contig_length_min:
+                if self.verbose:
+                    self.logger.debug("simple s-t path p {} is too short, length = {}, min allowed {}".format(p, path_len, self.contig_length_min))
+                continue
+            if path_len > self.contig_length_max:
+                if self.verbose:
+                    self.logger.debug("simple s-t path p {} is too long, length = {}, max allowed {} ".format(p, path_len, self.contig_length_max))
+                continue
+            
             # not max bottle
             if bottle_neck < max_bottle - min_bottle_resolution:
                 continue
             
-            # examine path length 
-            path_len = len(self.node_path_to_seq(self.graph, p))  
-            diff = abs(path_len - self.contig_length_fav)
-            if path_len < self.contig_length_min:
-                self.logger.debug("simple s-t path p {} is too short, length = {}, min allowed {}".format(p, path_len, self.contig_length_min))
-                continue
-            if path_len > self.contig_length_max:
-                self.logger.debug("simple s-t path p {} is too long, length = {}, max allowed {} ".format(p, path_len, self.contig_length_max))
-                continue
-
             # new max bottle
             if bottle_neck > max_bottle + min_bottle_resolution:
                 max_bottle = bottle_neck
                 max_bottle_path = p
                 max_bottle_length_diff = diff
-                # print("passed bottle neck")
-                continue               
 
             # equal w. resolution
             elif diff < max_bottle_length_diff:
@@ -666,9 +867,12 @@ class AnchorGuidedAssembler():
             else:
                 # print("same bottle neck but bad length {}".format(path_len))
                 pass
-                    
-        return max_bottle_path
-    
+
+            if self.contig_path != max_bottle_path:
+                self.contig_path = max_bottle_path
+                self.contig_seq = self.node_path_to_seq(self.graph, self.contig_path)
+                self.contig_bottle = max_bottle
+        return 0    
 
     def write_contig(self):
         """
@@ -684,9 +888,11 @@ class AnchorGuidedAssembler():
         with open(output_contig_file + '.fa', 'w') as f:
             trim_head = self.barcode_len if self.barcode_trim else 0            
             bc = self.contig_seq[:self.barcode_len]
-            f.write('>{}_BC_{}'.format(','.join(self.contig_path), bc))
+            f.write('>{}'.format(output_contig_file))
+            # f.write('>{}_BC_{}__Nodes_\"{}\"'.format(output_contig_file, bc, ','.join(self.contig_path)))
             f.write('\n')
-            f.write(self.contig_seq[trim_head:])
+            f.write(self.contig_seq[trim_head:].strip())
+            f.write('\n')
         return 0
 
 
@@ -717,27 +923,24 @@ if __name__ == '__main__':
                         help="A variable end anchor following anchor_end immediately in molecule, e.g. HT_index_2 or equivalent")   
     recommendarg.add_argument('-o', '--output_contig_file', default="anchor_guide_contig", required=False, metavar='\b',
                         help='output file prefix, default: anchor_guide_contig')
-    
+    configarg.add_argument('--no-tackle_low_cov',
+                           dest='tackle_low_cov', action='store_false', 
+                           help='NOT tackle low coverage samples by selecting long contig with descent coverage')
+    configarg.set_defaults(tackle_low_cov=True)
+
     configarg.add_argument('--contig_barcode_len', type=int, metavar='\b',
                         help='length of contig barcode')
     
-    configarg.add_argument('--trim_barcode', type=bool, metavar='\b',
-                        help='if trimming barcode from contig ')
+    configarg.add_argument('--no-trim_barcode', 
+                           dest='trim_barcode', action='store_false', 
+                           help='NOT trimming contig barcode from contig ')
+    configarg.set_defaults(trim_barcode=True)
 
     configarg.add_argument('--max_nm_anchors', type=int, default=2, metavar='\b',
                         help='maximum number of anchors permitted')
-
-    configarg.add_argument('--use_ambiguous_anchor', type=bool, metavar='\b',
-                        help='if anchor node is ambiguous, use the max-depth one')
-    configarg.add_argument('--allow_repeats_same_orientation', type=bool, metavar='\b')
-    configarg.add_argument('--allow_repeats_revcomp', type=bool, metavar='\b')
-    configarg.add_argument('--always_keep_ndoe_longer_than_length_good', type=bool, metavar='\b')
     
     args = parser.parse_args()
 
-
-    print(args.read1_fq)
-    left= args.read1_fq
     AGA = AnchorGuidedAssembler(
                         args.gfa,
                         args.anchor_start,
@@ -749,5 +952,6 @@ if __name__ == '__main__':
                         ht_index_2=args.ht_index_2,
                         barcode_trim = True,
                         max_nm_anchors = args.max_nm_anchors,
-                        barcode_len = args.contig_barcode_len,   
+                        barcode_len = args.contig_barcode_len,
+                        do_strategy_low_cov = args.tackle_low_cov, 
                         verbose=verbose)

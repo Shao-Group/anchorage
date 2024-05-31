@@ -1,13 +1,7 @@
 """
-Author: Carl Zang
-Date Started: Jul 2023
-Last updated: Jul 25 2023 or check git history 
-
-Version:    v0.0.1
-
-
 BSD 3-Clause License
 
+Copyright (c) 2024, Xiaofei Carl Zang, Mingfu Shao, and The Pennsylvania State University
 Copyright (c) 2024, Element Biosciences 
 
 Redistribution and use in source and binary forms, with or without
@@ -130,7 +124,7 @@ def subseq_pos(seq1, seq2, nm=0):
         return position of seq2's first subseq (return -1 if unfeasible) 
         if using number of operations (substitution, insertion, deletion) can
             transform seq1 to this subsequence of seq2
-        Assume seq1 is shorter seq2
+        Assume seq1 is shorter than seq2
     """
     if not set(seq1 + seq2).issubset(set("ATCG")):
         print("WARNING:\t sequenes have non-ATCG bases. Proceed anyway.", file=sys.stdout)
