@@ -27,7 +27,7 @@ conda activate anchorage
 
 # Usage
 ```
-usage: anchorage.py -s1 -s2 -r1 -r2 [options]
+usage: python anchorage.py -s1 -s2 -r1 -r2 [options]
 
 Required arguments:
   -s1, --anchor_start
@@ -45,6 +45,19 @@ optional arguments:
   --max_nm_anchors           maximum number of mismatches/indels in anchors permitted
   --verbose                  
 ```
+
+# Example
+We provided an example dataset and its ground truth sequence in the `example` directory.
+The reads are simulated using NG_042068.1.fa as a reference and added CGCAGAGTACAT/TTGGAGTTAAAG as the start/end anchors.
+
+Users can assemble this SLR by using:
+```sh
+ulimit -n 2048  # for MacOS
+
+python anchorage.py -s1 CGCAGAGTACAT -s2 TTGGAGTTAAAG -r1 example/sample_01_1.fasta -r2 example/sample_01_2.fasta  --no-trim_barcode --contig_barcode_len 0 -o anchorage-example
+```
+The assembled fasta sequence will be in `anchorage-example.fa`
+
 
 ## Additional information for MacOS
 run `ulimit -n 2048` before running anchorage. This is needed by kmc. See https://github.com/refresh-bio/KMC/issues/140.
