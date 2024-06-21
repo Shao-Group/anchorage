@@ -1,16 +1,6 @@
 # Anchorage
 
-The Anchorage algorithm is a method to assemble synthetic long reads (SLR) with anchors, that are known short sequences ligated to both ends ligated of a sequenced molecule. It is applicable to LoopSeq and LoopSeq Solo. 
-
-Compared to other state-of-art assemblers, Anchorage efficiently utilize the following information to perform assembly:
-
-1. strand-specificity and monoclonality of LoopSeq data
-2. contig anchors to mark start and end of the contig
-3. accurate estimation of barcoded contig length and sequencing coverage from raw reads
-
-# License
-
-Anchorage is available under a [BSD-3-Clause license](./LICENSE). This repository provides only the anchorage assembly algorithm and parts of its code are forked from [loop-core](https://github.com/Elembio/loop-core) (see [loop-core's LICENSE](https://github.com/Elembio/loop-core/blob/main/LICENSE)). For the complete LoopSeq data analysis pipeline, including trimming, demultiplex, read grouping by UMI, assembly, aggregation of results, please refer to [loop-core](https://github.com/Elembio/loop-core). 
+The Anchorage algorithm is a method to assemble synthetic long reads (SLR) with anchors. Anchors are known short sequences ligated to both ends of a sequenced molecule. It is applicable to LoopSeq, LoopSeq Solo, and other sequencing technologies which have known sequences at the end points of a molecule.
 
 # Installation
 
@@ -30,14 +20,14 @@ conda activate anchorage
 usage: python anchorage.py -s1 -s2 -r1 -r2 [options]
 
 Required arguments:
-  -s1, --anchor_start
-  -s2, --anchor_end
-  -r1, --read1_fq
-  -r2, --read2_fq
+  -s1, --anchor_start       sequence of start anchor
+  -s2, --anchor_end         sequence of end anchor
+  -r1, --read1_fq           read1 file of fastq/fasta 
+  -r2, --read2_fq           read2 file of fastq/fasta
 
 optional arguments:
   -h, --help                 show this help message and exit
-  -o, --output_prefix        output file prefix, default: anchor_guide_contig
+  -o, --output_prefix        output file prefix, default: anchorage_contig
   -k                         a series of k-mer sizes, default 21,33,55,77,99.
   -t, --threads              number of threads for spades
   --contig_barcode_len       length of contig barcode (for LoopSeq Solo)
@@ -45,6 +35,8 @@ optional arguments:
   --max_nm_anchors           maximum number of mismatches/indels in anchors permitted
   --verbose                  
 ```
+## Additional information for MacOS
+run `ulimit -n 2048` before running anchorage. This is needed by kmc. See https://github.com/refresh-bio/KMC/issues/140.
 
 # Example
 We provided an example dataset and its ground truth sequence in the `example` directory.
@@ -58,6 +50,6 @@ python anchorage.py -s1 CGCAGAGTACAT -s2 TTGGAGTTAAAG -r1 example/sample_01_1.fa
 ```
 The assembled fasta sequence will be in `anchorage-example.fa`
 
+# License
 
-## Additional information for MacOS
-run `ulimit -n 2048` before running anchorage. This is needed by kmc. See https://github.com/refresh-bio/KMC/issues/140.
+Anchorage is available under a [BSD-3-Clause license](./LICENSE). This repository provides only the anchorage assembly algorithm and parts of its code are forked from [loop-core](https://github.com/Elembio/loop-core) (see [loop-core's LICENSE](https://github.com/Elembio/loop-core/blob/main/LICENSE)). For the complete LoopSeq data analysis pipeline, including trimming, demultiplex, read grouping by UMI, assembly, aggregation of results, please refer to [loop-core](https://github.com/Elembio/loop-core). 
