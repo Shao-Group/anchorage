@@ -53,3 +53,10 @@ The assembled fasta sequence will be in `anchorage-example.fa`
 # License
 
 Anchorage is available under a [BSD-3-Clause license](./LICENSE). This repository provides only the anchorage assembly algorithm and parts of its code are forked from [loop-core](https://github.com/Elembio/loop-core) (see [loop-core's LICENSE](https://github.com/Elembio/loop-core/blob/main/LICENSE)). For the complete LoopSeq data analysis pipeline, including trimming, demultiplex, read grouping by UMI, assembly, aggregation of results, please refer to [loop-core](https://github.com/Elembio/loop-core). 
+
+# Citation
+
+If you find this repository useful, please consider cite:
+
+>Xiaofei Carl Zang, Xiang Li, Kyle Metcalfe, Tuval Ben-Yehezkel, Ryan Kelley, and Mingfu Shao. Anchorage Accurately Assembles Anchor-Flanked Synthetic Long Reads. In 24th International Workshop on Algorithms in Bioinformatics (WABI 2024). Leibniz International Proceedings in Informatics (LIPIcs), Volume 312, pp. 22:1-22:17, Schloss Dagstuhl – Leibniz-Zentrum für Informatik (2024)
+>https://doi.org/10.4230/LIPIcs.WABI.2024.22
