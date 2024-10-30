@@ -4,13 +4,17 @@ The Anchorage algorithm is a method to assemble synthetic long reads (SLR) with 
 
 # Installation
 
+Anchorage can be installed by cloning this repository.
 
-## Install manually
+```sh
+git clone https://github.com/Shao-Group/anchorage.git
+```
+
 Anchoarge is implemented in python3. Anchoarge requires [kmc3](https://github.com/refresh-bio/KMC) and [seqkit](https://github.com/shenwei356/seqkit) and is dependent on python package [networkx](https://networkx.org/) and [numpy](https://numpy.org/). 
 If desired, users may install the dependencies separately and manually, but all executables and libraries should be callable from `$PATH`.
 
 Otherwise, an easier way to install and use those dependencies is via conda with the `.yml` file .
-```
+```sh
 conda env create -f src/python/environment.yml
 conda activate anchorage
 ```
