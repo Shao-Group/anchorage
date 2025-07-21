@@ -112,7 +112,16 @@ Anchorage is freely available under a [BSD-3-Clause license](./LICENSE). This re
 
 # Citation
 
-If you find this repository useful, please consider citing:
+If you find this repository useful, please consider citing our [publicaiton](https://doi.org/10.1186/s13015-025-00288-4).
 
->Xiaofei Carl Zang, Xiang Li, Kyle Metcalfe, Tuval Ben-Yehezkel, Ryan Kelley, and Mingfu Shao. Anchorage Accurately Assembles Anchor-Flanked Synthetic Long Reads. In 24th International Workshop on Algorithms in Bioinformatics (WABI 2024). Leibniz International Proceedings in Informatics (LIPIcs), Volume 312, pp. 22:1-22:17, Schloss Dagstuhl – Leibniz-Zentrum für Informatik (2024)
->https://doi.org/10.4230/LIPIcs.WABI.2024.22
+```latex
+@article{anchorage,
+  title = {Anchorage Accurately Assembles Anchor-Flanked Synthetic Long Reads},
+  author = {Zang, {Xiaofei Carl} and Li, Xiang and Metcalfe, Kyle and {Ben-Yehezkel}, Tuval and Kelley, Ryan and Shao, Mingfu},
+  year = {2025},
+  journal = {Algorithms for Molecular Biology},
+  volume = {20},
+  number = {1},
+  pages = {12}
+}
+```
